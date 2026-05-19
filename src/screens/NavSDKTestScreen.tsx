@@ -1,13 +1,14 @@
 /**
- * STAGE D — startGuidance + camera follow. No business logic.
+ * STAGE D — startGuidance + camera follow + truck-safe routing constraints.
  *
  * Sequence:
  *   Stage A: NavigationView mounts
  *   Stage B: T&C → init() → OK
- *   Stage C: location permission → setDestination(Brentwood, TN) → RouteStatus.OK
+ *   Stage C: location permission → setDestination(Brentwood, TN, truck routing) → RouteStatus.OK
  *   Stage D: startGuidance() → setFollowingPerspective(TILTED)
  *
- * Rules: no multi-stop, no PDF/upload/checklist UI.
+ * Hard routing rule: avoidHighways + avoidTolls + avoidFerries enforced on every route.
+ * This is not a user toggle — trucks are never allowed on interstates or controlled-access roads.
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -40,6 +41,16 @@ const DESTINATION_BRENTWOOD_TN = {
   position: { lat: 36.0331, lng: -86.7828 },
   title: 'Brentwood, TN',
 };
+
+// Hard routing constraints for all trash truck routes — non-negotiable.
+// avoidHighways: no interstates, motorways, or controlled-access roads.
+// avoidTolls:    no toll roads.
+// avoidFerries:  no ferries.
+const TRUCK_ROUTING_OPTIONS = {
+  avoidHighways: true,
+  avoidTolls: true,
+  avoidFerries: true,
+} as const;
 
 interface LogEntry {
   ts: string;
@@ -151,14 +162,16 @@ export function NavSDKTestScreen() {
       return;
     }
 
-    // ── Stage C-2: Set destination ────────────────────────────────
+    // ── Stage C-2: Set destination (truck-safe routing) ───────────
     try {
       log('DEST', `setDestination → ${DESTINATION_BRENTWOOD_TN.title}`);
       log('DEST', `${DESTINATION_BRENTWOOD_TN.position.lat}, ${DESTINATION_BRENTWOOD_TN.position.lng}`);
+      log('ROUTE_OPTS', `avoidHighways=${TRUCK_ROUTING_OPTIONS.avoidHighways} avoidTolls=${TRUCK_ROUTING_OPTIONS.avoidTolls} avoidFerries=${TRUCK_ROUTING_OPTIONS.avoidFerries}`);
       setRouteStatus('CALCULATING');
 
       const result = await navigationController.setDestination(
-        DESTINATION_BRENTWOOD_TN
+        DESTINATION_BRENTWOOD_TN,
+        { routingOptions: TRUCK_ROUTING_OPTIONS }
       );
 
       log('DEST', `setDestination → ${result}`);
@@ -169,7 +182,7 @@ export function NavSDKTestScreen() {
         return;
       }
 
-      log('DEST', 'Route calculated');
+      log('DEST', 'Truck-safe route calculated (no highways/tolls/ferries)');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       log('DEST_ERR', `Exception: ${msg}`);
@@ -280,8 +293,7 @@ export function NavSDKTestScreen() {
         </View>
 
         <Text style={styles.destLabel}>
-          → {DESTINATION_BRENTWOOD_TN.title} ({DESTINATION_BRENTWOOD_TN.position.lat},{' '}
-          {DESTINATION_BRENTWOOD_TN.position.lng})
+          → {DESTINATION_BRENTWOOD_TN.title} · NO HWY · NO TOLL · NO FERRY
         </Text>
 
         <ScrollView
