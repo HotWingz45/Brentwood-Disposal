@@ -40,6 +40,9 @@ module.exports = {
     },
     minSdkVersion: 24,
   },
+  extra: {
+    googleMapsApiKey: GOOGLE_MAPS_API_KEY,
+  },
   plugins: [
     'expo-dev-client',
     [
