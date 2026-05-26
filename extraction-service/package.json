@@ -9,7 +9,6 @@
   },
   "scripts": {
     "build": "tsc",
-    "prestart": "node -e \"require('fs').accessSync('dist/index.js')\"",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "dev:watch": "nodemon --exec \"ts-node src/index.ts\" --ext ts"
