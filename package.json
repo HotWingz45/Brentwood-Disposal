@@ -5,11 +5,13 @@
   "scripts": {
     "start": "expo start",
     "android": "expo run:android",
-    "ios": "expo run:ios"
+    "ios": "expo run:ios",
+    "test:parser": "tsc -p scripts/route-parser-harness/tsconfig.json && node scripts/route-parser-harness/dist/scripts/route-parser-harness/runHarness.js"
   },
   "dependencies": {
     "@googlemaps/react-native-navigation-sdk": "^0.15.2",
     "@react-native-async-storage/async-storage": "^2.1.2",
+    "@supabase/supabase-js": "^2.106.1",
     "expo": "~53.0.27",
     "expo-asset": "~11.1.7",
     "expo-build-properties": "^0.14.8",
@@ -17,19 +19,22 @@
     "expo-dev-client": "~5.2.4",
     "expo-document-picker": "~13.1.6",
     "expo-file-system": "~18.1.11",
+    "expo-haptics": "~14.1.4",
     "expo-location": "~18.1.6",
     "expo-network": "~7.1.5",
+    "expo-speech": "~13.1.7",
     "expo-status-bar": "~2.2.3",
+    "fflate": "^0.8.3",
     "papaparse": "^5.5.3",
     "react": "19.0.0",
     "react-native": "0.79.6",
-    "xlsx": "^0.18.5",
-    "expo-speech": "~13.1.7",
-    "expo-haptics": "~14.1.4"
+    "react-native-url-polyfill": "^3.0.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/papaparse": "^5.5.2",
     "@types/react": "~19.0.10",
+    "@types/uuid": "^10.0.0",
     "typescript": "~5.8.3"
   },
   "private": true,

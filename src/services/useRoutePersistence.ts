@@ -5,6 +5,11 @@ import { RouteSessionStatus, type RouteSession } from '../models/RouteSession';
 const SESSION_KEY = '@brentwood_disposal/route_session';
 const DEBOUNCE_MS = 600;
 
+// Bump when the on-disk shape changes in a non-additive way.
+// Legacy saves (no schemaVersion field) are accepted by validateSession;
+// once a save is re-written, schemaVersion is stamped on.
+export const CURRENT_SCHEMA_VERSION = 1;
+
 export interface PersistenceResult {
   /**
    * Debounced write — schedules a disk write DEBOUNCE_MS after the last call.
@@ -50,7 +55,11 @@ export function useRoutePersistence(): PersistenceResult {
 
       debounceRef.current = setTimeout(async () => {
         try {
-          const json = JSON.stringify({ ...session, updatedAt: Date.now() });
+          const json = JSON.stringify({
+            ...session,
+            updatedAt: Date.now(),
+            schemaVersion: CURRENT_SCHEMA_VERSION,
+          });
           await AsyncStorage.setItem(SESSION_KEY, json);
           log(
             'PERSIST',
@@ -75,7 +84,11 @@ export function useRoutePersistence(): PersistenceResult {
         debounceRef.current = null;
       }
       try {
-        const json = JSON.stringify({ ...session, updatedAt: Date.now() });
+        const json = JSON.stringify({
+          ...session,
+          updatedAt: Date.now(),
+          schemaVersion: CURRENT_SCHEMA_VERSION,
+        });
         await AsyncStorage.setItem(SESSION_KEY, json);
         log(
           'PERSIST',
@@ -142,4 +155,18 @@ export function isResumableSession(session: RouteSession): boolean {
     session.sessionStatus !== RouteSessionStatus.COMPLETED &&
     session.currentStopIndex < session.stops.length
   );
+}
+
+/**
+ * Lightweight existence check used by callers that want to decide whether to
+ * render a resume affordance without paying for full JSON parse + validation.
+ * Returns true only when a non-empty value sits at SESSION_KEY.
+ */
+export async function hasSavedSession(): Promise<boolean> {
+  try {
+    const raw = await AsyncStorage.getItem(SESSION_KEY);
+    return !!raw && raw.length > 0;
+  } catch {
+    return false;
+  }
 }

@@ -1,4 +1,7 @@
-const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY ?? '';
+const GOOGLE_MAPS_API_KEY          = process.env.GOOGLE_MAPS_API_KEY ?? '';
+const SUPABASE_URL                 = process.env.SUPABASE_URL ?? '';
+const SUPABASE_ANON_KEY            = process.env.SUPABASE_ANON_KEY ?? '';
+const DOCUMENT_EXTRACTION_URL      = process.env.EXPO_PUBLIC_DOCUMENT_EXTRACTION_URL ?? '';
 
 if (!GOOGLE_MAPS_API_KEY) {
   console.warn('[app.config] GOOGLE_MAPS_API_KEY is not set. Check your .env file.');
@@ -41,7 +44,10 @@ module.exports = {
     minSdkVersion: 24,
   },
   extra: {
-    googleMapsApiKey: GOOGLE_MAPS_API_KEY,
+    googleMapsApiKey:        GOOGLE_MAPS_API_KEY,
+    supabaseUrl:             SUPABASE_URL,
+    supabaseAnonKey:         SUPABASE_ANON_KEY,
+    documentExtractionUrl:   DOCUMENT_EXTRACTION_URL,
   },
   plugins: [
     'expo-dev-client',

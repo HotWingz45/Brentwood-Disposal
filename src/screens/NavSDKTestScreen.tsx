@@ -46,12 +46,14 @@ import { useHapticFeedback } from '../hooks/useHapticFeedback';
 import { useDriverControls } from '../hooks/useDriverControls';
 import { useCalculationWatchdog } from '../hooks/useCalculationWatchdog';
 import { useHealthCheck } from '../hooks/useHealthCheck';
+import { useBackendSync } from '../hooks/useBackendSync';
 import { calculateRouteMetrics } from '../services/optimization/calculateRouteMetrics';
 import { validateSession, castSession } from '../services/sessionValidator';
 import { verifyRouteIntegrity } from '../services/routeIntegrity';
+import { showDebugUI, isProduction } from '../config/environment';
 import { BRENTWOOD_ROUTE } from '../data/brentwoodRoute';
 import { StopStatus, type Stop } from '../models/Stop';
-import { RouteSessionStatus } from '../models/RouteSession';
+import { RouteSessionStatus, type RouteSession } from '../models/RouteSession';
 
 // Hard routing constraints — non-negotiable for trash trucks.
 const TRUCK_ROUTING_OPTIONS = {
@@ -132,6 +134,12 @@ export function NavSDKTestScreen() {
   const [showImportSheet, setShowImportSheet] = useState(false);
   const [sessionRecoveringVisible, setSessionRecoveringVisible] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
+  const [debugOverride, setDebugOverride] = useState(false);
+  const debugOverrideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Phase 4: saved session held for user decision (Continue vs Start Fresh).
+  // While non-null, navReady stays false so guidance does not start on either
+  // the default route or the saved route until the driver picks.
+  const [pendingResume, setPendingResume] = useState<RouteSession | null>(null);
 
   // ── Refs ──────────────────────────────────────────────────────
   const initStartedRef      = useRef(false);
@@ -161,9 +169,22 @@ export function NavSDKTestScreen() {
   const logRef = useRef(log);
   logRef.current = log;
 
+  // ── Hidden debug gesture ──────────────────────────────────────
+  const handleDebugGesture = useCallback(() => {
+    if (debugOverrideTimerRef.current) clearTimeout(debugOverrideTimerRef.current);
+    setDebugOverride(true);
+    log('DEBUG', 'Overlay enabled via gesture — auto-hides in 30 s');
+    debugOverrideTimerRef.current = setTimeout(() => setDebugOverride(false), 30_000);
+  }, [log]);
+
+  useEffect(() => () => {
+    if (debugOverrideTimerRef.current) clearTimeout(debugOverrideTimerRef.current);
+  }, []);
+
   // ── Field resilience hooks ────────────────────────────────────
-  const { connectivity } = useConnectivity(log);
+  const { connectivity, isOnline } = useConnectivity(log);
   const { isStale: gpsStale, notifyUpdate: notifyGpsUpdate } = useGpsHealth(8_000, log);
+  const { syncStatus, recordEvent, syncRoute } = useBackendSync(isOnline, log);
 
   // ── Derived values ────────────────────────────────────────────
   const estimatedRemainingMinutes = useMemo(() => {
@@ -186,9 +207,33 @@ export function NavSDKTestScreen() {
     if (gpsStale && !prevGpsStaleRef.current) {
       voiceRef.current.speak('gps_weak');
       hapticRef.current.trigger('error');
+      recordEventRef.current('gps_stale', { sessionId: sessionIdRef.current });
     }
     prevGpsStaleRef.current = gpsStale;
   }, [gpsStale]);
+
+  // ── Telemetry: offline mode entered ──────────────────────────
+  const prevIsOnlineRef = useRef(true);
+  useEffect(() => {
+    if (!isOnline && prevIsOnlineRef.current) {
+      recordEventRef.current('offline_mode_entered', { sessionId: sessionIdRef.current });
+    }
+    prevIsOnlineRef.current = isOnline;
+  }, [isOnline]);
+
+  // ── Backend sync on stop progression ─────────────────────────
+  useEffect(() => {
+    if (!navReady || stops.length === 0) return;
+    syncRouteRef.current(
+      sessionIdRef.current,
+      stops,
+      currentStopIndex,
+      completedCount,
+      skippedCount,
+      isFinished ? RouteSessionStatus.COMPLETED : RouteSessionStatus.ACTIVE,
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStopIndex, completedCount, skippedCount, isFinished, navReady]);
 
   // ── Auto-save on orchestrator state changes ───────────────────
   useEffect(() => {
@@ -260,6 +305,9 @@ export function NavSDKTestScreen() {
   }, [navReady, isFinished, currentStopIndex, stops.length]);
 
   // ── Arrival detector ──────────────────────────────────────────
+  const recordEventRef = useRef(recordEvent);
+  recordEventRef.current = recordEvent;
+
   const handleArrived = useCallback(
     (stop: Stop, distFeet: number) => {
       log('ARRIVED', `Stop #${stop.sequenceNumber} — ${Math.round(distFeet)} ft from stop`);
@@ -267,6 +315,12 @@ export function NavSDKTestScreen() {
       log('ARRIVED', `GPS: ${stop.latitude}, ${stop.longitude} | ${new Date().toISOString()}`);
       voiceRef.current.speak('arrived');
       hapticRef.current.trigger('arrival');
+      recordEventRef.current('arrival_detected', {
+        sessionId: sessionIdRef.current,
+        stopId: stop.id,
+        stopSequence: stop.sequenceNumber,
+        distanceFeet: Math.round(distFeet),
+      });
       markArrived();
     },
     [markArrived, log]
@@ -293,6 +347,10 @@ export function NavSDKTestScreen() {
 
       log('PERSIST', 'Checking for saved session...');
       const rawSaved = await restore(log);
+      // Phase 4: stage saved session for user decision rather than auto-apply.
+      // The dialog renders after navigationController init + permissions are
+      // granted. Until the user picks, navReady stays false.
+      let stagedResume: RouteSession | null = null;
       if (rawSaved) {
         const validation = validateSession(rawSaved);
         if (!validation.valid) {
@@ -309,11 +367,11 @@ export function NavSDKTestScreen() {
             log('PERSIST', 'Discarding session with bad stops — starting fresh');
             await reset(log);
           } else if (isResumableSession(saved)) {
-            log('PERSIST', `Resuming session — stop ${saved.currentStopIndex + 1}/${saved.stops.length}`);
-            sessionIdRef.current = saved.id;
-            sessionCreatedAtRef.current = saved.createdAt;
-            restoreSession(saved.stops, saved.currentStopIndex);
-            setSessionRestored(true);
+            log(
+              'PERSIST',
+              `Resumable session found — stop ${saved.currentStopIndex + 1}/${saved.stops.length}; awaiting user choice`,
+            );
+            stagedResume = saved;
           } else {
             log('PERSIST', `Saved session is completed — starting fresh`);
           }
@@ -362,14 +420,54 @@ export function NavSDKTestScreen() {
       }
 
       setPermissionGranted(true);
-      setNavReady(true);
-      log('INIT', sessionRestored ? 'Nav ready — resuming route' : 'Nav ready — starting route');
+
+      if (stagedResume) {
+        // Hold navReady until the user picks Continue / Start Fresh.
+        // The resume dialog renders based on `pendingResume`.
+        setPendingResume(stagedResume);
+        log('INIT', 'Nav primed — awaiting resume decision');
+      } else {
+        setNavReady(true);
+        log('INIT', 'Nav ready — starting route');
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       log('INIT_ERR', `Exception: ${msg}`);
       setInitStatus(`ERROR:${msg}`);
     }
-  }, [navigationController, restore, restoreSession, sessionRestored, log]);
+  }, [navigationController, restore, reset, log]);
+
+  // ── Phase 4: resume-decision handlers ────────────────────────
+  const handleResumeContinue = useCallback(() => {
+    if (!pendingResume) return;
+    log(
+      'PERSIST',
+      `USER_CONTINUE — resuming stop ${pendingResume.currentStopIndex + 1}/${pendingResume.stops.length}`,
+    );
+    sessionIdRef.current = pendingResume.id;
+    sessionCreatedAtRef.current = pendingResume.createdAt;
+    restoreSession(pendingResume.stops, pendingResume.currentStopIndex);
+    setSessionRestored(true);
+    setPendingResume(null);
+    setNavReady(true);
+  }, [pendingResume, restoreSession, log]);
+
+  const handleResumeFresh = useCallback(async () => {
+    log('PERSIST', 'USER_START_FRESH — clearing saved session');
+    await reset(log);
+    // Belt-and-braces reset of orchestrator to a clean default route — matches
+    // handleReset, ensures no statuses survive the dialog window.
+    restoreSession(
+      BRENTWOOD_ROUTE.map((s) => ({ ...s, status: StopStatus.PENDING })),
+      0,
+    );
+    sessionIdRef.current = newSessionId();
+    sessionCreatedAtRef.current = Date.now();
+    lastRoutedStopIdRef.current = null;
+    setSessionRestored(false);
+    setPendingResume(null);
+    setNavReady(true);
+  }, [reset, restoreSession, log]);
 
   useEffect(() => {
     if (!mapReady || initStartedRef.current) return;
@@ -503,6 +601,11 @@ export function NavSDKTestScreen() {
       log('STOP', `✓ [${label}] Stop #${currentStop.sequenceNumber}: ${currentStop.address}`);
       log('STOP', `Timestamp: ${new Date().toISOString()}`);
       hapticRef.current.trigger('completion');
+      recordEventRef.current('stop_completed', {
+        sessionId: sessionIdRef.current,
+        stopId: currentStop.id,
+        stopSequence: currentStop.sequenceNumber,
+      });
       markCompleted();
     });
   }, [guardedComplete, currentStop, markCompleted, log]);
@@ -511,6 +614,11 @@ export function NavSDKTestScreen() {
     guardedSkip(() => {
       if (!currentStop) return;
       log('STOP', `⤳ [SKIPPED] Stop #${currentStop.sequenceNumber}: ${currentStop.address}`);
+      recordEventRef.current('stop_skipped', {
+        sessionId: sessionIdRef.current,
+        stopId: currentStop.id,
+        stopSequence: currentStop.sequenceNumber,
+      });
       skipStop();
     });
   }, [guardedSkip, currentStop, skipStop, log]);
@@ -533,18 +641,31 @@ export function NavSDKTestScreen() {
   }, [reset, restoreSession, log]);
 
   // ── Load imported route ───────────────────────────────────────
+  const syncRouteRef = useRef(syncRoute);
+  syncRouteRef.current = syncRoute;
+
   const handleLoadImportedRoute = useCallback(
-    async (newStops: Stop[]) => {
+    async (newStops: Stop[], wasOptimized: boolean) => {
       log('IMPORT', `Loading ${newStops.length}-stop route into navigator...`);
       await reset(log);
       restoreSession(newStops, 0);
-      sessionIdRef.current = newSessionId();
+      const sid = newSessionId();
+      sessionIdRef.current = sid;
       sessionCreatedAtRef.current = Date.now();
       lastRoutedStopIdRef.current = null;
       setSessionRestored(false);
       setRouteStatus('—');
       setDistanceToStop(null);
       setShowImportSheet(false);
+
+      if (wasOptimized) {
+        recordEventRef.current('optimization_applied', {
+          sessionId: sid,
+          stopCount: newStops.length,
+        });
+      }
+
+      syncRouteRef.current(sid, newStops, 0, 0, 0, RouteSessionStatus.ACTIVE);
     },
     [reset, restoreSession, log]
   );
@@ -580,8 +701,11 @@ export function NavSDKTestScreen() {
   }
 
   // ── Layout constants ──────────────────────────────────────────
-  const debugH    = focusMode ? 0 : DEBUG_H;
-  const recenterBottom = debugH + WORKFLOW_H + 12;
+  const shouldShowDebug  = showDebugUI || debugOverride;
+  const debugH           = focusMode || !shouldShowDebug ? 0 : DEBUG_H;
+  const recenterBottom   = debugH + WORKFLOW_H + 12;
+  // Banner floats above debug overlay when visible, above workflow when debug hidden
+  const bannerBottom     = shouldShowDebug && !focusMode ? WORKFLOW_H + DEBUG_H : WORKFLOW_H;
 
   // ── Colors ────────────────────────────────────────────────────
   const initColor  = chipColor(initStatus, 'OK');
@@ -611,8 +735,66 @@ export function NavSDKTestScreen() {
         </TouchableOpacity>
       )}
 
-      {/* Debug overlay — hidden in focus mode */}
-      {!focusMode && (
+      {/* Import route — always accessible in production */}
+      <TouchableOpacity
+        style={styles.floatingImportBtn}
+        onPress={() => setShowImportSheet(true)}
+        activeOpacity={0.8}
+      >
+        <Text style={styles.floatingImportText}>IMPORT</Text>
+      </TouchableOpacity>
+
+      {/* Phase 4: resume-decision overlay — appears only when a valid saved
+          session exists and the driver hasn't picked yet. */}
+      {pendingResume && (
+        <View style={styles.resumeOverlay} pointerEvents="box-none">
+          <View style={styles.resumeCard}>
+            <Text style={styles.resumeTitle}>Resume your route?</Text>
+            <Text style={styles.resumeSub}>
+              {`You were on stop ${pendingResume.currentStopIndex + 1} of ${pendingResume.stops.length}.`}
+            </Text>
+            <Text style={styles.resumeMeta}>
+              {`Last saved ${new Date(pendingResume.updatedAt).toLocaleString()}`}
+            </Text>
+            <TouchableOpacity
+              style={styles.resumeContinueBtn}
+              onPress={handleResumeContinue}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.resumeContinueText}>CONTINUE ROUTE →</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.resumeFreshBtn}
+              onPress={handleResumeFresh}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.resumeFreshText}>Start fresh (clear saved route)</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* Hidden debug gesture target — long-press top-left corner for 3 s */}
+      {isProduction && (
+        <TouchableOpacity
+          style={styles.hiddenDebugTrigger}
+          onLongPress={handleDebugGesture}
+          delayLongPress={3_000}
+          activeOpacity={1}
+        />
+      )}
+
+      {/* Operational field warnings — always visible, never hidden */}
+      <View style={[styles.warningBannerWrap, { bottom: bannerBottom }]} pointerEvents="none">
+        <FieldWarningBanner
+          gpsStale={gpsStale}
+          connectivity={connectivity}
+          sessionRecovering={sessionRecoveringVisible}
+        />
+      </View>
+
+      {/* Debug overlay — dev builds and gesture-override only */}
+      {shouldShowDebug && !focusMode && (
         <View
           style={[styles.debugOverlay, { bottom: WORKFLOW_H, height: DEBUG_H }]}
           pointerEvents="box-none"
@@ -621,12 +803,14 @@ export function NavSDKTestScreen() {
             <Text style={styles.debugTitle}>
               {viewMounted ? 'VIEW ✓' : 'VIEW…'}
               {sessionRestored ? '  [RESUMED]' : ''}
+              {debugOverride ? '  [DBG]' : ''}
             </Text>
             <View style={styles.debugHeaderRight} pointerEvents="box-none">
               <View style={styles.chipRow} pointerEvents="none">
-                <MiniChip label="INIT"  value={initStatus}                    color={initColor} />
-                <MiniChip label="ROUTE" value={routeStatus}                   color={routeColor} />
+                <MiniChip label="INIT"  value={initStatus}                      color={initColor} />
+                <MiniChip label="ROUTE" value={routeStatus}                     color={routeColor} />
                 <MiniChip label="NAV"   value={guidanceActive ? 'ACTIVE' : '—'} color={navColor} />
+                <MiniChip label="SYNC"  value={syncStatus}                      color={syncChipColor(syncStatus)} />
               </View>
               {/* Voice toggle */}
               <TouchableOpacity
@@ -649,13 +833,6 @@ export function NavSDKTestScreen() {
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={styles.importBtn}
-                onPress={() => setShowImportSheet(true)}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.importBtnText}>IMPORT</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
                 style={styles.resetBtn}
                 onPress={handleReset}
                 activeOpacity={0.7}
@@ -664,11 +841,6 @@ export function NavSDKTestScreen() {
               </TouchableOpacity>
             </View>
           </View>
-          <FieldWarningBanner
-            gpsStale={gpsStale}
-            connectivity={connectivity}
-            sessionRecovering={sessionRecoveringVisible}
-          />
           <ScrollView
             style={styles.logScroll}
             contentContainerStyle={styles.logContent}
@@ -720,6 +892,14 @@ export function NavSDKTestScreen() {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────
+
+function syncChipColor(status: string): string {
+  if (status === 'synced') return '#00ff88';
+  if (status === 'syncing') return '#aaaaaa';
+  if (status === 'offline_queue') return '#ffaa00';
+  if (status === 'failed') return '#ff4444';
+  return '#555555';
+}
 
 function chipColor(value: string, successValue: string): string {
   if (value === successValue) return '#00ff88';
@@ -821,15 +1001,36 @@ const styles = StyleSheet.create({
   toggleBtnText:    { fontSize: 10 },
   toggleBtnTextOn:  { fontSize: 10 },
 
-  importBtn: {
-    backgroundColor: '#0d2040',
-    borderRadius: 4,
-    paddingHorizontal: 7,
-    paddingVertical: 3,
+  floatingImportBtn: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 54 : 16,
+    right: 16,
+    backgroundColor: 'rgba(13,32,64,0.92)',
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
     borderWidth: 1,
     borderColor: '#1a73e8',
   },
-  importBtnText: { color: '#4da6ff', fontSize: 9, fontWeight: 'bold', fontFamily: 'monospace' },
+  floatingImportText: {
+    color: '#4da6ff',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+    fontFamily: 'monospace',
+  },
+  hiddenDebugTrigger: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: 70,
+    height: 70,
+  },
+  warningBannerWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+  },
   resetBtn: {
     backgroundColor: '#3a1010',
     borderRadius: 4,
@@ -852,5 +1053,68 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
+  },
+
+  // ── Phase 4: resume dialog ──
+  resumeOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.78)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 28,
+  },
+  resumeCard: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#0e0e14',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#1a73e8',
+    paddingVertical: 22,
+    paddingHorizontal: 22,
+    gap: 10,
+  },
+  resumeTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  resumeSub: {
+    color: '#bbbbbb',
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  resumeMeta: {
+    color: '#555',
+    fontSize: 11,
+    fontFamily: 'monospace',
+    marginBottom: 8,
+  },
+  resumeContinueBtn: {
+    backgroundColor: '#00c96a',
+    borderRadius: 10,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  resumeContinueText: {
+    color: '#000',
+    fontSize: 14,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+  },
+  resumeFreshBtn: {
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  resumeFreshText: {
+    color: '#888',
+    fontSize: 12,
+    textDecorationLine: 'underline',
   },
 });

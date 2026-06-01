@@ -21,6 +21,11 @@ export async function geocodeBatch(
   }
 
   log('GEOCODE', `GEOCODE_STARTED — resolving ${total} address${total === 1 ? '' : 'es'}`);
+
+  // Debug: log first 20 query strings so we can verify address quality
+  const preview = pendingIndexes.slice(0, 20).map((idx, n) => `  [${n + 1}] ${stops[idx]!.address}`);
+  log('GEOCODE', `GEOCODE_QUERY_PREVIEW (first ${Math.min(20, total)}):\n${preview.join('\n')}`);
+
   onProgress({ resolved: 0, failed: 0, total });
 
   const updated = [...stops];

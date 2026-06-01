@@ -16,9 +16,15 @@ const LOW_CONFIDENCE = new Set(['APPROXIMATE']);
 
 async function callGeocodingApi(address: string): Promise<GoogleGeocodeResponse> {
   const url = `${BASE_URL}?address=${encodeURIComponent(address)}&region=us&key=${API_KEY}`;
-  const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json() as Promise<GoogleGeocodeResponse>;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const resp = await fetch(url, { signal: controller.signal });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return resp.json() as Promise<GoogleGeocodeResponse>;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function extractStateCode(result: GoogleGeocodeResponse['results'][0]): string {

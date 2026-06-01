@@ -1,3 +1,4 @@
+import 'react-native-url-polyfill/auto';
 import { StatusBar } from 'expo-status-bar';
 import { NavSDKTestScreen } from './src/screens/NavSDKTestScreen';
 

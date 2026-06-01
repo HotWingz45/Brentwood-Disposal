@@ -19,3 +19,20 @@ export function normalizeStops(stops: ImportedStop[]): ImportedStop[] {
     return { ...s, address: addr };
   });
 }
+
+// Comparison-only normalization used for duplicate detection.
+// Does NOT mutate the stop's address; pure transform on a string.
+// Steps per PARSER_SCHEMA.md duplicate-detection rules:
+//   1. lowercase
+//   2. strip punctuation except digits and spaces
+//   3. collapse whitespace
+//   4. strip trailing ", brentwood, tn" default suffix appended by normalizeStops
+export function normalizeAddressForCompare(address: string): string {
+  return address
+    .toLowerCase()
+    .replace(/[^\w\d\s]/g, ' ')          // strip punctuation
+    .replace(/\s+/g, ' ')                 // collapse whitespace
+    .trim()
+    .replace(/\s*brentwood\s+tn\s*$/, '') // strip default suffix
+    .trim();
+}

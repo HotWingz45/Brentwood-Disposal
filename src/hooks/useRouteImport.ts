@@ -31,7 +31,11 @@ export function useRouteImport(
       }
 
       setPhase('extracting');
-      const importResult = await runImportPipeline({ mode: 'file', ...file }, log);
+      const importResult = await runImportPipeline(
+        { mode: 'file', ...file },
+        log,
+        (p) => setPhase(p),
+      );
       setResult(importResult);
       setPhase('parsed');
     } catch (err: unknown) {

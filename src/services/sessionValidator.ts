@@ -1,5 +1,6 @@
 import { RouteSessionStatus, type RouteSession } from '../models/RouteSession';
 import { StopStatus } from '../models/Stop';
+import { CURRENT_SCHEMA_VERSION } from './useRoutePersistence';
 
 export type ValidationResult =
   | { valid: true }
@@ -8,12 +9,24 @@ export type ValidationResult =
 /**
  * Validates a persisted RouteSession for structural integrity before restoring.
  * Returns { valid: false, reason } on ANY sign of corruption.
+ *
+ * Schema-version handling:
+ *   - missing schemaVersion → legacy save written before Phase 4; accepted.
+ *   - schemaVersion === CURRENT_SCHEMA_VERSION → accepted.
+ *   - anything else → rejected.
  */
 export function validateSession(raw: unknown): ValidationResult {
   if (!raw || typeof raw !== 'object') {
     return { valid: false, reason: 'session is not an object' };
   }
   const s = raw as Record<string, unknown>;
+
+  const v = s.schemaVersion;
+  if (v !== undefined && v !== null) {
+    if (typeof v !== 'number' || v !== CURRENT_SCHEMA_VERSION) {
+      return { valid: false, reason: `unsupported schemaVersion: ${String(v)}` };
+    }
+  }
 
   if (!s.id || typeof s.id !== 'string') {
     return { valid: false, reason: 'missing or non-string id' };
